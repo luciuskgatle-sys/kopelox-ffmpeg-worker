@@ -1,7 +1,4 @@
-// This is the ACTUAL code to deploy on Railway as your FFmpeg worker
-// Deploy this as your main.ts/main.js on Railway with Deno runtime
-
-import { exec } from "https://deno.land/std@0.208.0/process/mod.ts";
+// Deploy this code on Railway as server.js with Deno runtime
 
 async function downloadFile(url, path) {
   const response = await fetch(url);
@@ -64,7 +61,6 @@ Deno.serve(async (req) => {
     }
 
     // Build FFmpeg filter complex for grid layout
-    let filterComplex = "";
     let inputStr = "";
     
     for (let i = 0; i < contributions.length; i++) {
@@ -72,10 +68,6 @@ Deno.serve(async (req) => {
     }
 
     // Create grid layout with ffmpeg
-    const row = Math.floor(contributions.length / gridSize);
-    const col = contributions.length % gridSize || gridSize;
-    
-    // Simple grid: just concat in 2x2 or 3x3, etc
     let filterParts = [];
     for (let i = 0; i < contributions.length; i++) {
       filterParts.push(`[${i}]scale=${cellWidth}:${cellHeight}[v${i}]`);
@@ -104,8 +96,7 @@ Deno.serve(async (req) => {
       filterParts.push(`${hstacks[0]}copy[v]`);
     }
 
-    filterComplex = filterParts.join(";");
-
+    const filterComplex = filterParts.join(";");
     const outputPath = `${tmpDir}/output.mp4`;
     
     console.log("Running FFmpeg with filter:", filterComplex);
@@ -132,6 +123,7 @@ Deno.serve(async (req) => {
 
     console.log("FFmpeg processing complete");
 
+    // Read file and return as binary response
     const fileData = await Deno.readFile(outputPath);
     
     return new Response(fileData, {
