@@ -1,145 +1,148 @@
-import express from 'express';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegPath from '@ffmpeg-installer/ffmpeg';
-import fetch from 'node-fetch';
-import { createWriteStream, unlinkSync } from 'fs';
-import { pipeline } from 'stream/promises';
+// This is the ACTUAL code to deploy on Railway as your FFmpeg worker
+// Deploy this as your main.ts/main.js on Railway with Deno runtime
 
-ffmpeg.setFfmpegPath(ffmpegPath.path);
+import { exec } from "https://deno.land/std@0.208.0/process/mod.ts";
 
-const app = express();
-app.use(express.json({ limit: '50mb' }));
-
-const PORT = process.env.PORT || 3000;
-
-// Helper: Download file to disk
-async function downloadFile(url, filepath) {
+async function downloadFile(url, path) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`Failed to download ${url}`);
-  await pipeline(response.body, createWriteStream(filepath));
+  const arrayBuffer = await response.arrayBuffer();
+  await Deno.writeFile(path, new Uint8Array(arrayBuffer));
 }
 
-// Helper: Upload to Cloudinary
-async function uploadToCloudinary(filepath, filename) {
-  const form = new FormData();
-  form.append('file', require('fs').createReadStream(filepath));
-  form.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET || 'choir_videos');
-  form.append('folder', 'choir-sync');
-  form.append('public_id', filename.replace(/\.[^/.]+$/, ''));
-
-  const response = await fetch(
-    `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/video/upload`,
-    { method: 'POST', body: form }
-  );
-
-  if (!response.ok) throw new Error('Cloudinary upload failed');
-  const data = await response.json();
-  return data.secure_url;
+async function runCommand(cmd) {
+  const process = new Deno.Command(cmd[0], {
+    args: cmd.slice(1),
+    stdout: "piped",
+    stderr: "piped",
+  });
+  
+  const { success, stdout, stderr } = await process.output();
+  
+  if (!success) {
+    const errorMsg = new TextDecoder().decode(stderr);
+    throw new Error(`Command failed: ${errorMsg}`);
+  }
+  
+  return new TextDecoder().decode(stdout);
 }
 
-app.post('/', async (req, res) => {
+Deno.serve(async (req) => {
   try {
-    const { choir_id, contributions, layout_type = 'grid', output_width = 1920, output_height = 1080 } = req.body;
+    if (req.method !== "POST") {
+      return new Response(JSON.stringify({ error: "POST only" }), { status: 400 });
+    }
+
+    const payload = await req.json();
+    const { choir_id, contributions, layout_type = "grid", output_width = 1920, output_height = 1080 } = payload;
+
+    console.log(`FFmpeg Worker: Processing ${contributions.length} videos for choir ${choir_id}`);
 
     if (!contributions || contributions.length < 2) {
-      return res.status(400).json({ error: 'Need at least 2 videos' });
+      return new Response(JSON.stringify({ error: "Need at least 2 videos" }), { status: 400 });
     }
 
-    console.log(`Processing ${contributions.length} videos for choir ${choir_id}`);
+    // Calculate grid dimensions
+    const gridSize = Math.ceil(Math.sqrt(contributions.length));
+    const cellWidth = Math.floor(output_width / gridSize);
+    const cellHeight = Math.floor(output_height / gridSize);
+    const rows = Math.ceil(contributions.length / gridSize);
 
-    // Step 1: Download all videos
-    const videoFiles = [];
-    const tempDir = `/tmp/choir-${choir_id}`;
-    require('fs').mkdirSync(tempDir, { recursive: true });
+    // Create temp directory
+    await Deno.mkdir("/tmp/choir_processing", { recursive: true });
+    const tmpDir = `/tmp/choir_processing/${choir_id}`;
+    await Deno.mkdir(tmpDir, { recursive: true });
 
+    // Download all videos
+    console.log("Downloading videos...");
+    const downloadedPaths = [];
     for (let i = 0; i < contributions.length; i++) {
-      const filename = `${tempDir}/video_${i}.mp4`;
-      console.log(`Downloading video ${i + 1}/${contributions.length}...`);
-      await downloadFile(contributions[i].video_url, filename);
-      videoFiles.push({
-        path: filename,
-        offset: contributions[i].offset_seconds || 0
-      });
+      const vid = contributions[i];
+      const path = `${tmpDir}/video_${i}.mp4`;
+      console.log(`Downloading video ${i} from ${vid.video_url}`);
+      await downloadFile(vid.video_url, path);
+      downloadedPaths.push(path);
     }
 
-    // Step 2: Create grid layout with FFmpeg
-    console.log('Creating grid composition...');
-    const cols = Math.ceil(Math.sqrt(videoFiles.length));
-    const rows = Math.ceil(videoFiles.length / cols);
-    const cellWidth = Math.floor(output_width / cols);
-    const cellHeight = Math.floor(output_height / rows);
-
-    // Build FFmpeg filter for grid
-    let filterComplex = '';
-    let filterInputs = '';
-    for (let i = 0; i < videoFiles.length; i++) {
-      filterInputs += `[${i}:v]scale=${cellWidth}:${cellHeight}[v${i}];`;
+    // Build FFmpeg filter complex for grid layout
+    let filterComplex = "";
+    let inputStr = "";
+    
+    for (let i = 0; i < contributions.length; i++) {
+      inputStr += `-i ${downloadedPaths[i]} `;
     }
 
-    let gridString = '';
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const idx = row * cols + col;
-        if (idx < videoFiles.length) {
-          gridString += `[v${idx}]`;
+    // Create grid layout with ffmpeg
+    const row = Math.floor(contributions.length / gridSize);
+    const col = contributions.length % gridSize || gridSize;
+    
+    // Simple grid: just concat in 2x2 or 3x3, etc
+    let filterParts = [];
+    for (let i = 0; i < contributions.length; i++) {
+      filterParts.push(`[${i}]scale=${cellWidth}:${cellHeight}[v${i}]`);
+    }
+
+    // Build hstack/vstack pattern
+    let hstacks = [];
+    for (let r = 0; r < rows; r++) {
+      let rowVideos = [];
+      for (let c = 0; c < gridSize; c++) {
+        const idx = r * gridSize + c;
+        if (idx < contributions.length) {
+          rowVideos.push(`[v${idx}]`);
         }
       }
-      gridString += `hstack=inputs=${cols}[row${row}];`;
+      if (rowVideos.length > 0) {
+        const hstackName = `hstack${r}`;
+        filterParts.push(`${rowVideos.join("")}hstack=inputs=${rowVideos.length}[${hstackName}]`);
+        hstacks.push(`[${hstackName}]`);
+      }
     }
 
-    // Combine rows vertically
-    let rowInputs = '';
-    for (let row = 0; row < rows; row++) {
-      rowInputs += `[row${row}]`;
+    if (hstacks.length > 1) {
+      filterParts.push(`${hstacks.join("")}vstack=inputs=${hstacks.length}[v]`);
+    } else {
+      filterParts.push(`${hstacks[0]}copy[v]`);
     }
-    filterComplex = filterInputs + gridString + rowInputs + `vstack=inputs=${rows}`;
 
-    const outputPath = `${tempDir}/output.mp4`;
+    filterComplex = filterParts.join(";");
 
-    // Build FFmpeg command
-    let ffmpegCmd = ffmpeg();
-    videoFiles.forEach((v, i) => {
-      ffmpegCmd = ffmpegCmd.input(v.path);
-    });
+    const outputPath = `${tmpDir}/output.mp4`;
+    
+    console.log("Running FFmpeg with filter:", filterComplex);
 
-    // Step 3: Render with FFmpeg
-    await new Promise((resolve, reject) => {
-      ffmpegCmd
-        .complexFilter(filterComplex)
-        .output(outputPath)
-        .on('start', (cmd) => console.log('FFmpeg started:', cmd))
-        .on('progress', (progress) => console.log(`Progress: ${progress.percent}%`))
-        .on('end', () => {
-          console.log('FFmpeg completed');
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error('FFmpeg error:', err);
-          reject(err);
-        })
-        .run();
-    });
+    // Run FFmpeg
+    const cmd = [
+      "ffmpeg",
+      "-y",
+      ...inputStr.split(" ").filter(s => s),
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "[v]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "fast",
+      "-b:v",
+      "5000k",
+      outputPath
+    ];
 
-    // Step 4: Upload to Cloudinary
-    console.log('Uploading to Cloudinary...');
-    const videoUrl = await uploadToCloudinary(outputPath, `choir-${choir_id}`);
+    await runCommand(cmd);
 
-    // Cleanup
-    videoFiles.forEach(v => unlinkSync(v.path));
-    unlinkSync(outputPath);
-    require('fs').rmdirSync(tempDir);
+    console.log("FFmpeg processing complete");
 
-    res.json({
-      success: true,
-      output_video_url: videoUrl,
-      videos_combined: videoFiles.length,
-      processing_time: `${Math.round((Date.now() - req.startTime) / 1000)}s`
+    const fileData = await Deno.readFile(outputPath);
+    
+    return new Response(fileData, {
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Disposition": `attachment; filename="choir-${choir_id}.mp4"`
+      }
     });
 
   } catch (error) {
-    console.error('Processing error:', error);
-    res.status(500).json({ error: error.message });
+    console.error("FFmpeg worker error:", error);
+    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
 });
-
-app.listen(PORT, () => console.log(`FFmpeg worker on port ${PORT}`));
