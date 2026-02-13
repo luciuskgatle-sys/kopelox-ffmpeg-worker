@@ -1,6 +1,6 @@
 // FFmpeg Worker - Aligned to Architecture
 // Deploy to Railway - Handles offset_detection AND choir_render jobs
-// Uses FFmpeg cross-correlation for audio sync (no Cloudinary waveform dependency)
+// Uses FFmpeg silencedetect for audio sync
 
 async function downloadFile(url, path) {
   const response = await fetch(url);
@@ -25,9 +25,10 @@ async function runCommand(cmd) {
   return new TextDecoder().decode(stdout);
 }
 
-// Extract audio and analyze offset using FFmpeg cross-correlation
+// Detect audio offset using FFmpeg silencedetect (SOLID ARCHITECTURE-ALIGNED)
+// FFmpeg worker does ALL media processing - no external dependencies
 async function detectAudioOffset(videoUrl, masterAudioUrl, tmpDir) {
-  console.log('Starting FFmpeg audio offset detection...');
+  console.log('Starting FFmpeg silencedetect audio offset detection...');
   
   const videoPath = `${tmpDir}/contribution.mp4`;
   const masterPath = `${tmpDir}/master.wav`;
@@ -41,51 +42,63 @@ async function detectAudioOffset(videoUrl, masterAudioUrl, tmpDir) {
   await runCommand([
     'ffmpeg', '-i', videoPath,
     '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
-    videoAudioPath
+    '-y', videoAudioPath
   ]);
   
-  // Use FFmpeg audio correlation filter to find offset
-  // This creates a cross-correlation between the two audio files
-  const crossCorrPath = `${tmpDir}/xcorr.txt`;
+  console.log('Detecting first significant audio moment in both tracks...');
   
-  await runCommand([
-    'ffmpeg',
-    '-i', masterPath,
-    '-i', videoAudioPath,
-    '-filter_complex',
-    '[0:a][1:a]acrossfade=d=0:c1=tri:c2=tri',
-    '-f', 'null',
-    '-'
-  ]);
+  // Find when audio actually starts in each file (skip silence/countdown)
+  const masterStart = await detectFirstAudio(masterPath);
+  const contribStart = await detectFirstAudio(videoAudioPath);
   
-  // Alternative: Use acompare filter for detailed analysis
-  const compareOutput = await runCommand([
-    'ffmpeg',
-    '-i', videoAudioPath,
-    '-i', masterPath,
-    '-filter_complex',
-    '[0:a][1:a]amerge=inputs=2[a];[a]astats=metadata=1:reset=1',
-    '-f', 'null',
-    '-'
-  ]);
+  // Offset is the difference between when each track starts
+  const offset = contribStart - masterStart;
   
-  // Parse FFmpeg output to extract timing difference
-  // For now, use a simplified correlation approach
-  // In production, implement full cross-correlation or use specialized audio fingerprinting
-  
-  const offset = parseOffsetFromFFmpegOutput(compareOutput);
+  console.log(`Master starts at: ${masterStart.toFixed(2)}s`);
+  console.log(`Contribution starts at: ${contribStart.toFixed(2)}s`);
+  console.log(`Calculated offset: ${offset.toFixed(2)}s`);
   
   return {
-    offset_seconds: offset,
-    method: 'ffmpeg_audio_correlation'
+    offset_seconds: Math.abs(offset),
+    method: 'ffmpeg_silencedetect'
   };
 }
 
-function parseOffsetFromFFmpegOutput(output) {
-  // Simplified parser - in production use proper audio fingerprinting
-  // This is a placeholder for the actual FFmpeg correlation logic
-  // Real implementation would analyze audio streams and find peak correlation
-  return 0.0; // Placeholder - implement actual parsing
+async function detectFirstAudio(audioPath) {
+  // Find first moment of significant audio (above -40dB threshold)
+  try {
+    await runCommand([
+      'ffmpeg',
+      '-i', audioPath,
+      '-af', 'silencedetect=noise=-40dB:d=0.3',
+      '-f', 'null', '-'
+    ]);
+    return 0;
+  } catch (e) {
+    // FFmpeg writes to stderr even on success
+    const errorOutput = e.message || '';
+    
+    // Parse silencedetect output for first silence_end (= audio start)
+    const match = errorOutput.match(/silence_end: ([\d.]+)/);
+    if (match) {
+      return parseFloat(match[1]);
+    }
+    
+    // If no silence detected, audio starts at 0
+    return 0;
+  }
+}
+
+async function getAudioDuration(audioPath) {
+  const output = await runCommand([
+    'ffprobe',
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    audioPath
+  ]);
+  
+  return parseFloat(output.trim());
 }
 
 // Render choir grid video
