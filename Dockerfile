@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Clean apt cache and install ffmpeg and dependencies
+# Install ffmpeg and dependencies
 RUN apt-get clean && rm -rf /var/lib/apt/lists/* && \
     apt-get update && apt-get install -y \
     ffmpeg \
