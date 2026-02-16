@@ -221,19 +221,24 @@ def process_choir_render(job_contract):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 class WorkerHandler(BaseHTTPRequestHandler):
+    def _send_cors_headers(self):
+        """Send CORS headers"""
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.send_header('Access-Control-Max-Age', '86400')
+    
     def do_OPTIONS(self):
         """Handle preflight CORS requests"""
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self._send_cors_headers()
         self.end_headers()
     
     def do_GET(self):
         """Health check endpoint"""
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps({'status': 'healthy', 'service': 'ffmpeg-worker'}).encode())
     
@@ -249,20 +254,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 result = process_offset_detection(job_contract)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
             elif job_type == 'choir_render':
                 result = process_choir_render(job_contract)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
             else:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': f'Unknown job_type: {job_type}'}).encode())
                 
@@ -272,7 +277,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e)}).encode())
     
