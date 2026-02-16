@@ -290,5 +290,27 @@ def run_server(port=8000):
     server.serve_forever()
 
 if __name__ == '__main__':
+    print("=" * 60)
+    print("FFmpeg Librosa Worker Starting...")
+    print("=" * 60)
+    
+    # Check dependencies
+    if not librosa:
+        print("ERROR: librosa not installed!")
+        exit(1)
+    
+    print(f"✓ librosa version: {librosa.__version__}")
+    print(f"✓ numpy available")
+    
+    # Check ffmpeg
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        print(f"✓ ffmpeg available: {result.stdout.split()[2]}")
+    except Exception as e:
+        print(f"ERROR: ffmpeg not available: {e}")
+        exit(1)
+    
     port = int(os.environ.get('PORT', 8000))
+    print(f"\n🚀 Starting server on port {port}...")
+    print("=" * 60)
     run_server(port)
