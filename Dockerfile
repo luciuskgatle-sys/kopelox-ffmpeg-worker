@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.10-bookworm
 
 ENV PYTHONUNBUFFERED=1
 
@@ -18,3 +18,4 @@ COPY . .
 EXPOSE 8080
 
 CMD ["python", "ffmpegWorkerPython.py"]
+
