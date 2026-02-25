@@ -104,17 +104,19 @@ async def choir_render_job(payload: dict):
         # Build FFmpeg filter for grid layout
         filter_parts = []
         
-        # Use smaller resolution to reduce memory usage on Render free tier
+        # Dynamic tile sizing based on grid
         tile_width = 640 // grid_cols
         tile_height = 360 // grid_rows
         
+        print(f"[WORKER] Using tile dimensions: {tile_width}x{tile_height}")
+        
         for idx, video in enumerate(video_files):
             offset = video['offset']
-            # Process video: trim, scale, and prepare audio
+            # FIXED: Use explicit tile dimensions instead of ow/oh for padding
             filter_parts.append(
                 f"[{idx}:v]trim=start={offset},setpts=PTS-STARTPTS,"
                 f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
-                f"pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2[v{idx}]"
+                f"pad={tile_width}:{tile_height}:({tile_width}-iw)/2:({tile_height}-ih)/2[v{idx}]"
             )
             # Extract and trim audio
             filter_parts.append(
@@ -146,6 +148,11 @@ async def choir_render_job(payload: dict):
         
         filter_complex = ';'.join(filter_parts) + ';' + audio_filter
         
+        # DEBUG: Print the actual filter_complex being sent to FFmpeg
+        print(f"[WORKER] ===== FILTER_COMPLEX =====")
+        print(filter_complex)
+        print(f"[WORKER] ===== END FILTER_COMPLEX =====")
+        
         # Output file
         output_path = os.path.join(work_dir, 'output_grid.mp4')
         
@@ -162,14 +169,14 @@ async def choir_render_job(payload: dict):
             '-map', '[outv]',
             '-map', '[outa]',
             '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-crf', '28',
+            '-preset', 'ultrafast',  # Fastest encoding to reduce memory
+            '-crf', '28',  # Lower quality but much faster
             '-maxrate', '2M',
             '-bufsize', '4M',
             '-c:a', 'aac',
             '-b:a', '128k',
-            '-t', '60',
-            '-threads', '2',
+            '-t', '60',  # Limit to 60 seconds
+            '-threads', '2',  # Limit CPU threads
             output_path
         ])
         
@@ -180,7 +187,7 @@ async def choir_render_job(payload: dict):
             ffmpeg_cmd,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300  # 5 minute timeout
         )
         
         if result.returncode != 0:
@@ -206,6 +213,7 @@ async def choir_render_job(payload: dict):
         return {
             "status": "success",
             "job_id": job_id,
+            "output_video_url": video_url,
             "video_url": video_url,
             "clip_count": num_videos,
             "grid_layout": f"{grid_rows}x{grid_cols}"
@@ -234,7 +242,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     port = int(os.environ.get("PORT", 8080))
-    print(f"Starting FastAPI server on port {port}...")
+    print(f"🚀 Starting FastAPI server on port {port}...")
     print("=" * 60)
     
     uvicorn.run(app, host="0.0.0.0", port=port)
