@@ -104,7 +104,7 @@ async def choir_render_job(payload: dict):
         # Build FFmpeg filter for grid layout
         filter_parts = []
         
-        # Dynamic tile sizing based on grid
+        # Use smaller resolution to reduce memory usage on Render free tier
         tile_width = 640 // grid_cols
         tile_height = 360 // grid_rows
         
@@ -112,11 +112,11 @@ async def choir_render_job(payload: dict):
         
         for idx, video in enumerate(video_files):
             offset = video['offset']
-            # FIXED: Use explicit tile dimensions instead of ow/oh for padding
+            # Scale down to fit tile, then pad to exact dimensions (ow/oh work after scale)
             filter_parts.append(
                 f"[{idx}:v]trim=start={offset},setpts=PTS-STARTPTS,"
                 f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
-                f"pad={tile_width}:{tile_height}:({tile_width}-iw)/2:({tile_height}-ih)/2[v{idx}]"
+                f"pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2:color=black[v{idx}]"
             )
             # Extract and trim audio
             filter_parts.append(
