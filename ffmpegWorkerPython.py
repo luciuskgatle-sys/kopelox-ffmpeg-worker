@@ -111,12 +111,12 @@ async def choir_render_job(payload: dict):
         print(f"[WORKER] Using tile dimensions: {tile_width}x{tile_height}")
         
         for idx, video in enumerate(video_files):
+            print(f"[DEBUG] Processing video {idx}")
             offset = video['offset']
-            # Scale down to fit tile, then pad to exact dimensions (ow/oh work after scale)
+            # DIAGNOSTIC: Removed pad entirely to isolate the issue
             filter_parts.append(
                 f"[{idx}:v]trim=start={offset},setpts=PTS-STARTPTS,"
-                f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
-                f"pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2:color=black[v{idx}]"
+                f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease[v{idx}]"
             )
             # Extract and trim audio
             filter_parts.append(
