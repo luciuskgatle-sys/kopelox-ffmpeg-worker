@@ -105,18 +105,21 @@ async def choir_render_job(payload: dict):
         filter_parts = []
         
         # Use smaller resolution to reduce memory usage on Render free tier
-        tile_width = 640 // grid_cols
-        tile_height = 360 // grid_rows
+        # Ensure dimensions are even (required by libx264)
+        tile_width = (640 // grid_cols) & ~1  # Round down to nearest even number
+        tile_height = (360 // grid_rows) & ~1  # Round down to nearest even number
         
         print(f"[WORKER] Using tile dimensions: {tile_width}x{tile_height}")
         
         for idx, video in enumerate(video_files):
             print(f"[DEBUG] Processing video {idx}")
             offset = video['offset']
-            # DIAGNOSTIC: Removed pad entirely to isolate the issue
+            # Scale with aspect ratio preservation, then force even dimensions
             filter_parts.append(
                 f"[{idx}:v]trim=start={offset},setpts=PTS-STARTPTS,"
-                f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease[v{idx}]"
+                f"fps=30,"
+                f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                f"scale=trunc(iw/2)*2:trunc(ih/2)*2[v{idx}]"
             )
             # Extract and trim audio
             filter_parts.append(
