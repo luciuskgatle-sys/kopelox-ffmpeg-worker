@@ -212,6 +212,7 @@ async def choir_render_job(payload: dict):
         
         # Extract job parameters
         auto_clips = payload.get('auto_layer', {}).get('clips', [])
+        master_audio_url = payload.get('master_audio_url')
         layout = payload.get('layout', {})
         output_config = payload.get('output', {})
         
@@ -219,6 +220,17 @@ async def choir_render_job(payload: dict):
             raise ValueError("No clips provided for rendering")
         
         print(f"[WORKER] Rendering {len(auto_clips)} clips")
+        
+        # Download master audio if provided (for drift test mode)
+        master_audio_path = None
+        if master_audio_url:
+            print(f"[WORKER] Downloading master audio...")
+            master_audio_path = os.path.join(work_dir, "master_audio.mp3")
+            response = requests.get(master_audio_url, stream=True, timeout=60)
+            response.raise_for_status()
+            with open(master_audio_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
         
         # Download videos
         video_files = []
@@ -260,45 +272,74 @@ async def choir_render_job(payload: dict):
         
         print(f"[WORKER] Using tile dimensions: {tile_width}x{tile_height}")
         
-        for idx, video in enumerate(video_files):
-            print(f"[DEBUG] Processing video {idx}")
-            offset = video['offset']
-            # Timeline shift: videos enter mosaic at correct master timestamp
+        # SINGLE VIDEO MODE (drift test - NO XSTACK)
+        if num_videos == 1:
+            print(f"[WORKER] ===== DRIFT TEST MODE =====")
+            print(f"[WORKER] Single video - NO xstack, NO grid")
+            offset = video_files[0]['offset']
+            
+            if master_audio_path:
+                # Mix contributor audio with master audio
+                print(f"[WORKER] Mixing contributor + master audio")
+                filter_complex = (
+                    f"[0:v]setpts=PTS+({offset})/TB,"
+                    f"fps=30,"
+                    f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2[outv];"
+                    f"[0:a]asetpts=PTS+({offset})/TB[contrib_audio];"
+                    f"[1:a][contrib_audio]amix=inputs=2:duration=longest[outa]"
+                )
+            else:
+                # No master audio - just contributor
+                print(f"[WORKER] Single video, no master audio")
+                filter_complex = (
+                    f"[0:v]setpts=PTS+({offset})/TB,"
+                    f"fps=30,"
+                    f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2[outv];"
+                    f"[0:a]asetpts=PTS+({offset})/TB[outa]"
+                )
+        else:
+            # MULTI-VIDEO GRID MODE
+            for idx, video in enumerate(video_files):
+                print(f"[DEBUG] Processing video {idx}")
+                offset = video['offset']
+                # Timeline shift: videos enter mosaic at correct master timestamp
+                filter_parts.append(
+                    f"[{idx}:v]setpts=PTS+({offset})/TB,"
+                    f"fps=30,"
+                    f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2[v{idx}]"
+                )
+                # Audio timeline shift (must match video)
+                filter_parts.append(
+                    f"[{idx}:a]asetpts=PTS+({offset})/TB[a{idx}]"
+                )
+            
+            # Create grid using xstack
+            input_labels = ''.join([f"[v{i}]" for i in range(num_videos)])
+            
+            # Build xstack layout
+            xstack_layout = ''
+            for row in range(grid_rows):
+                for col in range(grid_cols):
+                    idx = row * grid_cols + col
+                    if idx < num_videos:
+                        x_pos = col * tile_width
+                        y_pos = row * tile_height
+                        if xstack_layout:
+                            xstack_layout += '|'
+                        xstack_layout += f"{x_pos}_{y_pos}"
+            
             filter_parts.append(
-                f"[{idx}:v]setpts=PTS+({offset})/TB,"
-                f"fps=30,"
-                f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2[v{idx}]"
+                f"{input_labels}xstack=inputs={num_videos}:layout={xstack_layout}[outv]"
             )
-            # Audio timeline shift (must match video)
-            filter_parts.append(
-                f"[{idx}:a]asetpts=PTS+({offset})/TB[a{idx}]"
-            )
-        
-        # Create grid using xstack
-        input_labels = ''.join([f"[v{i}]" for i in range(num_videos)])
-        
-        # Build xstack layout
-        xstack_layout = ''
-        for row in range(grid_rows):
-            for col in range(grid_cols):
-                idx = row * grid_cols + col
-                if idx < num_videos:
-                    x_pos = col * tile_width
-                    y_pos = row * tile_height
-                    if xstack_layout:
-                        xstack_layout += '|'
-                    xstack_layout += f"{x_pos}_{y_pos}"
-        
-        filter_parts.append(
-            f"{input_labels}xstack=inputs={num_videos}:layout={xstack_layout}[outv]"
-        )
-        
-        # Combine audio (mix all prepared tracks)
-        audio_inputs = ''.join([f"[a{i}]" for i in range(num_videos)])
-        audio_filter = f"{audio_inputs}amix=inputs={num_videos}:duration=longest[outa]"
-        
-        filter_complex = ';'.join(filter_parts) + ';' + audio_filter
+            
+            # Combine audio (mix all prepared tracks)
+            audio_inputs = ''.join([f"[a{i}]" for i in range(num_videos)])
+            audio_filter = f"{audio_inputs}amix=inputs={num_videos}:duration=longest[outa]"
+            
+            filter_complex = ';'.join(filter_parts) + ';' + audio_filter
         
         # DEBUG: Print the actual filter_complex being sent to FFmpeg
         print(f"[WORKER] ===== FILTER_COMPLEX =====")
@@ -314,6 +355,10 @@ async def choir_render_job(payload: dict):
         # Add all input files
         for video in video_files:
             ffmpeg_cmd.extend(['-i', video['path']])
+        
+        # Add master audio as input if present (for drift test)
+        if master_audio_path:
+            ffmpeg_cmd.extend(['-i', master_audio_path])
         
         # Add filters with memory-efficient encoding
         ffmpeg_cmd.extend([
