@@ -114,16 +114,16 @@ async def choir_render_job(payload: dict):
         for idx, video in enumerate(video_files):
             print(f"[DEBUG] Processing video {idx}")
             offset = video['offset']
-            # Scale with aspect ratio preservation, then force even dimensions
+            # Timeline shift: videos enter mosaic at correct master timestamp
             filter_parts.append(
-                f"[{idx}:v]trim=start={offset},setpts=PTS-STARTPTS,"
+                f"[{idx}:v]setpts=PTS+({offset})/TB,"
                 f"fps=30,"
                 f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2[v{idx}]"
             )
-            # Extract and trim audio
+            # Audio timeline shift (must match video)
             filter_parts.append(
-                f"[{idx}:a]atrim=start={offset},asetpts=PTS-STARTPTS[a{idx}]"
+                f"[{idx}:a]asetpts=PTS+({offset})/TB[a{idx}]"
             )
         
         # Create grid using xstack
