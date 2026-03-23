@@ -15,7 +15,6 @@ import math
 
 app = FastAPI()
 
-# Cloudinary configuration from environment
 cloudinary.config(
     cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
     api_key=os.environ.get('CLOUDINARY_API_KEY'),
@@ -24,12 +23,11 @@ cloudinary.config(
 
 @app.get("/")
 def health_check():
-    """Health check endpoint"""
     return {"status": "worker running", "service": "ffmpeg-worker-production"}
 
 @app.post("/worker/offset")
 async def offset_job(payload: dict):
-    """Offset detection endpoint - Real audio cross-correlation"""
+    """Offset detection endpoint"""
     job_id = payload.get('job_id', 'unknown')
     contribution_id = payload.get('contribution_id')
     
@@ -45,9 +43,6 @@ async def offset_job(payload: dict):
         
         if not master_audio_url or not contribution_video_url:
             raise ValueError("Missing master_audio_url or contribution_video_url")
-        
-        print(f"[WORKER] Master: {master_audio_url[:50]}...")
-        print(f"[WORKER] Contribution: {contribution_video_url[:50]}...")
         
         master_path = os.path.join(work_dir, "master.mp3")
         response = requests.get(master_audio_url, stream=True, timeout=60)
@@ -68,13 +63,6 @@ async def offset_job(payload: dict):
             'ffmpeg', '-y', '-i', contrib_path,
             '-ac', '1', '-ar', '16000', '-t', '30',
             contrib_audio_path
-        ], check=True, capture_output=True)
-        
-        master_wav_path = os.path.join(work_dir, "master.wav")
-        subprocess.run([
-            'ffmpeg', '-y', '-i', master_path,
-            '-ac', '1', '-ar', '16000', '-t', '60',
-            master_wav_path
         ], check=True, capture_output=True)
         
         offset_seconds = 10.0
@@ -131,9 +119,10 @@ async def offset_job(payload: dict):
         if work_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
 
+
 @app.post("/")
 async def choir_render_job(payload: dict):
-    """Choir video rendering endpoint - creates synchronized grid video"""
+    """Choir video rendering - synchronized grid with tempo correction"""
     job_id = payload.get('job_id', 'unknown')
     job_type = payload.get('job_type')
     
@@ -151,7 +140,9 @@ async def choir_render_job(payload: dict):
         auto_clips = payload.get('auto_layer', {}).get('clips', [])
         master_audio_url = payload.get('master_audio_url')
         performance_start_offset = float(payload.get('performance_start_offset', 0))
+        master_duration = float(payload.get('master_duration', 0))
         
+        print(f"[WORKER] master_duration: {master_duration}s")
         print(f"[WORKER] performance_start_offset: {performance_start_offset}s")
         
         if len(auto_clips) == 0:
@@ -180,8 +171,7 @@ async def choir_render_job(payload: dict):
             ], check=True, capture_output=True)
         
         # Download videos
-        # KEY FIX: offset is applied via -ss at input level to TRIM the clip start
-        # This pulls the singing forward so it aligns with master t=0
+        # KEY: offset applied via -ss at input level to trim silence from clip start
         video_files = []
         for idx, clip in enumerate(auto_clips):
             video_url = clip['video_url']
@@ -202,7 +192,7 @@ async def choir_render_job(payload: dict):
                 'index': idx
             })
         
-        # Calculate grid dimensions
+        # Grid dimensions
         num_videos = len(video_files)
         grid_cols = math.ceil(math.sqrt(num_videos))
         grid_rows = math.ceil(num_videos / grid_cols)
@@ -217,29 +207,55 @@ async def choir_render_job(payload: dict):
         filter_parts = []
         
         if num_videos == 1:
-            # Offset applied at input level via -ss, just scale here
+            # Single video with tempo correction
+            offset = video_files[0]['offset']
+            clip_duration = float(auto_clips[0].get('duration_seconds', 0))
+            effective_duration = clip_duration - offset
+
+            if master_duration > 0 and effective_duration > 0:
+                tempo_ratio = max(0.5, min(2.0, effective_duration / master_duration))
+                pts_ratio = 1.0 / tempo_ratio
+            else:
+                tempo_ratio = 1.0
+                pts_ratio = 1.0
+
+            print(f"[WORKER] Single clip tempo correction: ratio={tempo_ratio:.4f}")
+
             if master_audio_path:
                 filter_complex = (
-                    f"[0:v]fps=30,"
+                    f"[0:v]fps=30,setpts={pts_ratio:.6f}*PTS,"
                     f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=increase,crop={tile_width}:{tile_height}[outv];"
-                    f"[0:a][1:a]amix=inputs=2:duration=longest[outa]"
+                    f"[0:a]atempo={tempo_ratio:.6f}[contrib_fixed];"
+                    f"[contrib_fixed][1:a]amix=inputs=2:duration=longest[outa]"
                 )
             else:
                 filter_complex = (
-                    f"[0:v]fps=30,"
+                    f"[0:v]fps=30,setpts={pts_ratio:.6f}*PTS,"
                     f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=increase,crop={tile_width}:{tile_height}[outv];"
-                    f"[0:a]anull[outa]"
+                    f"[0:a]atempo={tempo_ratio:.6f}[outa]"
                 )
         else:
-            # MULTI-VIDEO GRID MODE
-            # Offsets applied at input level via -ss, just scale/crop here
-            for idx in range(num_videos):
+            # Multi-video grid with per-clip tempo correction
+            for idx, video in enumerate(video_files):
+                offset = video['offset']
+                clip_duration = float(auto_clips[idx].get('duration_seconds', 0))
+                effective_duration = clip_duration - offset
+
+                if master_duration > 0 and effective_duration > 0:
+                    tempo_ratio = max(0.5, min(2.0, effective_duration / master_duration))
+                    pts_ratio = 1.0 / tempo_ratio
+                else:
+                    tempo_ratio = 1.0
+                    pts_ratio = 1.0
+
+                print(f"[WORKER] Clip {idx}: effective={effective_duration:.2f}s master={master_duration:.2f}s tempo={tempo_ratio:.4f}")
+
                 filter_parts.append(
-                    f"[{idx}:v]fps=30,"
+                    f"[{idx}:v]fps=30,setpts={pts_ratio:.6f}*PTS,"
                     f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=increase,crop={tile_width}:{tile_height}[v{idx}]"
                 )
                 filter_parts.append(
-                    f"[{idx}:a]anull[a{idx}]"
+                    f"[{idx}:a]atempo={tempo_ratio:.6f}[a{idx}]"
                 )
             
             input_labels = ''.join([f"[v{i}]" for i in range(num_videos)])
@@ -277,12 +293,11 @@ async def choir_render_job(payload: dict):
         output_path = os.path.join(work_dir, 'output_grid.mp4')
         
         # Build FFmpeg command
-        # KEY FIX: apply -ss BEFORE -i for each clip to seek/trim at input level
+        # -ss BEFORE -i applies input seek to trim silence at clip start
         ffmpeg_cmd = ['ffmpeg', '-y']
         
         for video in video_files:
             if video['offset'] > 0:
-                # -ss before -i = fast input seek, trims silence from start
                 ffmpeg_cmd.extend(['-ss', str(video['offset']), '-i', video['path']])
             else:
                 ffmpeg_cmd.extend(['-i', video['path']])
@@ -301,7 +316,6 @@ async def choir_render_job(payload: dict):
             '-bufsize', '4M',
             '-c:a', 'aac',
             '-b:a', '128k',
-            '-t', '60',
             '-threads', '2',
             output_path
         ])
@@ -312,7 +326,7 @@ async def choir_render_job(payload: dict):
             ffmpeg_cmd,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=600
         )
         
         if result.returncode != 0:
@@ -326,7 +340,7 @@ async def choir_render_job(payload: dict):
             output_path,
             resource_type="video",
             folder="choir_contributions",
-            timeout=180
+            timeout=300
         )
         
         video_url = upload_result['secure_url']
@@ -355,6 +369,7 @@ async def choir_render_job(payload: dict):
         if work_dir and os.path.exists(work_dir):
             print(f"[WORKER] Cleaning up {work_dir}")
             shutil.rmtree(work_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     print("=" * 60)
